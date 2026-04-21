@@ -4,12 +4,8 @@ Send NITF (National Imagery Transmission Format) files across a streaming
 cross-domain solution (CDS) that only accepts a single XML document per
 message and validates against an XSD.
 
-## Problem
 
-The previous file-transfer CDS is EOL. The replacement is a TCP streaming
-CDS that delimits messages on XML root start/end tags and validates them
-against a supplied XSD before forwarding. NITF is a length-prefixed binary
-format — it cannot ride the wire as-is. We need a way to:
+We need a way to:
 
 1. Convert NITF to a form the CDS can inspect.
 2. Preserve round-trip fidelity so the high side reconstructs the original
@@ -73,8 +69,6 @@ leaks downstream.
 | `nitf_envelope.xsd` | CDS envelope schema (our own) |
 | `nitf_send.py` | Low-side wrapper: `daffodil parse` → envelope XML |
 | `nitf_recv.py` | High-side wrapper: envelope XML → `daffodil unparse` |
-| `testData/` | NITB baseline samples from `DFDLSchemas/NITF` |
-| `PROJECT.md`, `HANDOFF.md` | Design notes and session context |
 
 ## Prerequisites
 
@@ -185,5 +179,3 @@ round-trip limitations — not something this project introduces.
   (2026) noted below each upstream header.
 - `jpeg.dfdl.xsd` — from the [DFDLSchemas/jpeg](https://github.com/DFDLSchemas/jpeg)
   project. Retain its original license.
-- `nitf_send.py`, `nitf_recv.py`, `nitf_envelope.xsd`, `README.md`,
-  `PROJECT.md`, `HANDOFF.md` — copyright (c) 2026 Tyler Finn.
