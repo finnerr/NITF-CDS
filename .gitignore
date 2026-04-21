@@ -1,22 +1,14 @@
-# Daffodil
-apache-daffodil-*-bin/
-apache-daffodil-*-src/
-apache-daffodil-*.zip
-apache-daffodil-*.tgz
-daffodil-blobs/
-
-# Test artifacts (generated; regenerate with the batch script in README)
-test_artifacts/
-
 # Test corpus (fetched from DFDLSchemas/NITF; see README)
 testData/
+
+# Daffodil blob sidecars (generated during parse)
+daffodil-blobs/
 
 # Scratch / working outputs
 envelope.xml
 parsed*.xml
 roundtrip*.ntf
 *.log
-/tmp/
 
 # Python
 __pycache__/
@@ -30,11 +22,3 @@ venv/
 .idea/
 .vscode/
 *.swp
-
-# Claude Code session files
-.claude/
-CLAUDE.md
-
-# Internal working docs (not for the repo)
-HANDOFF.md
-PROJECT.md
