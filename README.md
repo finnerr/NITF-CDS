@@ -66,9 +66,14 @@ leaks downstream.
 |---|---|
 | `nitf.dfdl.xsd`, `nitf_common_types.dfdl.xsd`, `nitf_extension_types.dfdl.xsd` | Forked Owl/Tresys NITF DFDL schemas (import paths localized) |
 | `jpeg.dfdl.xsd` | Dependency of `nitf_extension_types` (JFIF-compressed imagery) |
-| `nitf_envelope.xsd` | CDS envelope schema (our own) |
-| `nitf_send.py` | Low-side wrapper: `daffodil parse` → envelope XML |
-| `nitf_recv.py` | High-side wrapper: envelope XML → `daffodil unparse` |
+| `nitf_envelope.xsd` | CDS envelope schema with strict NITF payload validation (dev-side) |
+| `nitf_envelope_lean.xsd` | CDS envelope schema with opaque payload (ship this to the CDS) |
+| `samples/sample.envelope.xml` | Known-good envelope for validator smoke-testing |
+| `nitf_send.py` / `nitf_recv.py` | Low-/high-side Python wrappers (reference implementation + CLI) |
+| `nitf_send.groovy` / `nitf_recv.groovy` | NiFi `ExecuteGroovyScript` ports of the senders/receivers |
+| `test/run_roundtrip.groovy` | Single-file harness for the Groovy scripts |
+| `test/batch_roundtrip.groovy` | Full-corpus harness for the Groovy scripts |
+| `test/nifi_stubs/` | Minimal NiFi interface stubs so the Groovy scripts can run outside NiFi |
 
 ## Prerequisites
 
@@ -146,6 +151,97 @@ Current corpus status: 36/40 byte-identical. The remaining 4
 (`i_3015a`, `i_3025b`, `i_3114e`, `i_3117ax`) also fail a plain
 `daffodil parse`/`unparse` with no envelope, i.e., upstream schema
 round-trip limitations — not something this project introduces.
+
+## NiFi deployment
+
+Production flow uses Apache NiFi on both sides of the CDS, with our
+`nitf_send.groovy` / `nitf_recv.groovy` running inside
+`ExecuteGroovyScript` processors. The Groovy scripts call the Daffodil
+JVM API directly — no subprocess, no CLI, no temp files for XML.
+
+### Required files on the NiFi node
+
+1. **Apache Daffodil 4.1.0 binary distribution.** Everything in its
+   `lib/` directory goes onto the processor classpath. Air-gapped:
+   carry the `apache-daffodil-4.1.0-bin.tgz` across on approved media
+   and unpack to, e.g., `/opt/daffodil-4.1.0`.
+2. **The DFDL schemas from this repo**: `nitf.dfdl.xsd`,
+   `nitf_common_types.dfdl.xsd`, `nitf_extension_types.dfdl.xsd`,
+   `jpeg.dfdl.xsd`. Drop them in a single directory the NiFi user can
+   read, e.g., `/opt/nitf-cds/schemas/`.
+3. **The Groovy scripts**: `nitf_send.groovy` and `nitf_recv.groovy`
+   (one per side, but both are safe to stage together).
+
+No Maven, pip, or internet access required — Daffodil ships every
+runtime JAR inside its `lib/` directory, and the Groovy scripts use
+only JDK stdlib + Daffodil.
+
+### Processor configuration
+
+For the low-side `ExecuteGroovyScript` processor running
+`nitf_send.groovy`:
+
+| Property | Value |
+|---|---|
+| Script File | `/opt/nitf-cds/nitf_send.groovy` |
+| Additional classpath | `/opt/daffodil-4.1.0/lib/*` |
+| Dynamic property: `Schema Path` | `/opt/nitf-cds/schemas/nitf.dfdl.xsd` |
+| Dynamic property: `Max Binary Size` | `0` (force every payload through the manifest) |
+
+Receive-side is identical except the script is `nitf_recv.groovy` and
+you don't need the `Max Binary Size` property.
+
+The first FlowFile through each processor pays a one-time ~3-second
+schema compile; subsequent FlowFiles reuse the compiled
+`DataProcessor` via a static field. Do not lower the processor's
+concurrent-tasks below 1 or you'll lose the cache.
+
+### Suggested flow shapes
+
+Low side:
+```
+ListFile (source/) → UnpackContent (.tar.gz) → RouteOnAttribute (*.ntf|*.nitf)
+  → ExecuteGroovyScript (nitf_send.groovy) → PutTCP (→ CDS)
+```
+
+High side:
+```
+ListenTCP → UpdateAttribute (filename) → ExecuteGroovyScript (nitf_recv.groovy)
+  → PutFile (archive/) + PutFile (processing/)
+```
+
+### Smoke test before wiring to the CDS
+
+Run the batch harness on the NiFi node (or any JDK-bearing box) to
+confirm Daffodil + schemas + Groovy scripts agree with your Java
+runtime:
+
+```
+groovy -cp "test/nifi_stubs:/opt/daffodil-4.1.0/lib/*" \
+  test/batch_roundtrip.groovy testData nitf.dfdl.xsd
+```
+
+Expect `36 PASS / 4 DIFF`. The four DIFFs are upstream DFDL round-trip
+limitations, documented in the TODO.
+
+### Preparing an air-gapped bundle
+
+One-time, on a connected box, assemble a single directory you can
+tarball across:
+
+```
+airgap-bundle/
+├── apache-daffodil-4.1.0-bin.tgz      # wget from daffodil.apache.org
+├── jdk/                                # Temurin tar.gz for your target OS
+├── groovy/                             # optional; only if you want the
+│                                       # out-of-NiFi batch harness on-box
+├── nitf-cds/                           # clone of this repo
+└── testData/                           # optional; 40-file corpus for smoke tests
+```
+
+Then on the target: unpack Daffodil, install the JDK, stage the repo
+files where the NiFi user can read them, set the processor properties
+above, start the flow.
 
 ## TODO
 
