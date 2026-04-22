@@ -29,7 +29,7 @@ pass using nitf_envelope.xsd or an XSLT policy.
       <xs:sequence>
         <xs:element name="Manifest" type="ManifestType"/>
         <xs:element name="Blobs"    type="BlobsType" minOccurs="0"/>
-        <xs:element name="Payload"  type="PayloadType"/>
+        <xs:element name="Payload"  type="xs:anyType"/>
       </xs:sequence>
       <xs:attribute name="version" type="xs:string" use="required" fixed="1"/>
     </xs:complexType>
@@ -64,12 +64,6 @@ pass using nitf_envelope.xsd or an XSLT policy.
           </xs:simpleContent>
         </xs:complexType>
       </xs:element>
-    </xs:sequence>
-  </xs:complexType>
-
-  <xs:complexType name="PayloadType">
-    <xs:sequence>
-      <xs:any processContents="skip"/>
     </xs:sequence>
   </xs:complexType>
 
