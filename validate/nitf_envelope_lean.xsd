@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Tyler Finn.
+Part of the NITF-over-CDS project.
+
+CDS envelope schema — validates the full NITF message including
+the NITF 2.1 infoset payload.
+
+Structure:
+  <NitfMessage version="1">
+    <Manifest>     per-blob index, size, sha256
+    <Blobs>        base64 sidecars for each image blob (optional)
+    <Payload>      contains a single <nitf:NITF> infoset element
+
+The NITF infoset itself is defined in nitf_infoset_v21.xsd
+(namespace urn:nitf:2.1).
+
+Deliberate non-goals:
+  - No xs:any / xs:anyAttribute extension points. For accreditation,
+    the schema must fully describe every element and attribute that
+    can pass through the CDS. Forward compatibility is handled by
+    bumping the namespace (urn:cds:nitf:2, urn:nitf:2.2, etc.).
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:nitf="urn:nitf:2.1"
+           xmlns="urn:cds:nitf:1"
+           targetNamespace="urn:cds:nitf:1"
+           elementFormDefault="qualified">
+
+  <xs:import namespace="urn:nitf:2.1"
+             schemaLocation="nitf_infoset_v21.xsd"/>
+
+  <xs:element name="NitfMessage">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Manifest" type="ManifestType"/>
+        <xs:element name="Blobs"    type="BlobsType" minOccurs="0"/>
+        <xs:element name="Payload"  type="PayloadType"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:string" use="required" fixed="1"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="PayloadType">
+    <xs:sequence>
+      <xs:element ref="nitf:NITF"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ManifestType">
+    <xs:sequence>
+      <xs:element name="Blob" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="index"  type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="size"   type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="sha256" use="required">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:pattern value="[0-9a-f]{64}"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="BlobsType">
+    <xs:sequence>
+      <xs:element name="BlobData" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:simpleContent>
+            <xs:extension base="xs:base64Binary">
+              <xs:attribute name="index" type="xs:nonNegativeInteger" use="required"/>
+            </xs:extension>
+          </xs:simpleContent>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

@@ -1,0 +1,1196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Tyler Finn.
+Part of the NITF-over-CDS project.
+
+NITF 2.1 infoset schema — validates the Daffodil-emitted infoset XML
+for an NITF 2.1 file. Matches the structure that Daffodil produces
+when parsing with the JITC NITF 2.1 DFDL schema.
+
+Namespace:
+  urn:nitf:2.1            — only the <NITF> root lives here
+  (no namespace)          — all child elements (DFDL emits them
+                            unqualified, using the prefix only on
+                            the root element)
+
+elementFormDefault="unqualified" is therefore the correct default.
+
+Scope of v1:
+  Supports files with a File Header and TextSegment(s). Covers
+  i_3114e.xml. Other segment types (ImageSegment, GraphicSegment,
+  DataExtensionSegment, ReservedExtensionSegment) are intentionally
+  omitted — they will be added iteratively as we cover additional
+  test files, each addition reviewed independently.
+
+Nillable elements:
+  Daffodil emits xsi:nil="true" on NITF security fields that the
+  spec allows to be blank. Every such element is declared
+  nillable="true" here so validators accept the nil representation.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:nitf:2.1"
+           targetNamespace="urn:nitf:2.1"
+           elementFormDefault="unqualified">
+
+  <!-- =======================================================
+       Root element
+
+       Segment order in the infoset mirrors the on-wire NITF order:
+       File Header, then Image, Graphic, Text, DataExtension, and
+       ReservedExtension segments (DES/RES not yet modelled; none
+       of the current test corpus exercises them).
+       ======================================================= -->
+  <xs:element name="NITF">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Header"                   type="FileHeaderType"/>
+        <xs:element name="ImageSegment"             type="ImageSegmentType"
+                    minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="GraphicSegment"           type="GraphicSegmentType"
+                    minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="TextSegment"              type="TextSegmentType"
+                    minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="DataExtensionSegment"     type="DataExtensionSegmentType"
+                    minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="ReservedExtensionSegment" type="ReservedExtensionSegmentType"
+                    minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- =======================================================
+       Reusable simple types
+       ======================================================= -->
+
+  <!-- NITF spec: U (Unclassified), R (Restricted), C (Confidential),
+       S (Secret), T (Top Secret). Single character. -->
+  <xs:simpleType name="SecurityClassificationType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="U"/>
+      <xs:enumeration value="R"/>
+      <xs:enumeration value="C"/>
+      <xs:enumeration value="S"/>
+      <xs:enumeration value="T"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- NITF 2.1 file profile name is fixed. -->
+  <xs:simpleType name="FileProfileNameType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="NITF"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- NITF 2.1 version field. -->
+  <xs:simpleType name="FileVersionType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="02.10"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C FHDR 'STYPE' field. -->
+  <xs:simpleType name="StandardTypeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="BF01"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Encryption flag: 0 (none). Spec reserves other values but
+       they are not in production use. -->
+  <xs:simpleType name="EncryptionType">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:maxInclusive value="0"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 2-digit hex byte used for RGB background colour components. -->
+  <xs:simpleType name="HexByteType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9A-Fa-f]{2}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Non-empty uppercase hex blob. JFIF DataBlob/APP-data, LUT entries,
+       CGM graphic data, DES/RES raw user data. -->
+  <xs:simpleType name="HexBlobType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9A-F]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Possibly-empty uppercase hex blob. DHT Huffman value slots where
+       some code-length buckets hold zero symbols. -->
+  <xs:simpleType name="HexOrEmptyType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9A-F]*"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Signed decimal-degree latitude string: ±dd.d+ (e.g. +32.983). -->
+  <xs:simpleType name="DecimalLatType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[-+][0-9]{2}\.[0-9]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Signed decimal-degree longitude string: ±ddd.d+ (e.g. +085.000). -->
+  <xs:simpleType name="DecimalLonType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[-+][0-9]{3}\.[0-9]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- UTM/MGRS zone number (1–60). -->
+  <xs:simpleType name="UTMZoneType">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:minInclusive value="1"/>
+      <xs:maxInclusive value="60"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MGRS latitude band letter C–X (I and O are excluded). -->
+  <xs:simpleType name="MGRSBandType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[C-HJ-NP-X]"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MGRS 100km grid square column or row letter (A–Z). -->
+  <xs:simpleType name="MGRSGridLetterType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- TextFormat: NITF 2.1 defines USASCII, UT1, MTF, STA. -->
+  <xs:simpleType name="TextFormatType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="USASCII"/>
+      <xs:enumeration value="UT1"/>
+      <xs:enumeration value="MTF"/>
+      <xs:enumeration value="STA"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C PVTYPE. -->
+  <xs:simpleType name="PixelValueTypeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="INT"/>
+      <xs:enumeration value="B"/>
+      <xs:enumeration value="SI"/>
+      <xs:enumeration value="R"/>
+      <xs:enumeration value="C"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C IREP. -->
+  <xs:simpleType name="ImageRepresentationType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="MONO"/>
+      <xs:enumeration value="RGB"/>
+      <xs:enumeration value="RGB/LUT"/>
+      <xs:enumeration value="MULTI"/>
+      <xs:enumeration value="NODISPLY"/>
+      <xs:enumeration value="NVECTOR"/>
+      <xs:enumeration value="POLAR"/>
+      <xs:enumeration value="VPH"/>
+      <xs:enumeration value="YCbCr601"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C ICAT — per MIL-STD-2500C Table A-4. Not every
+       value is exercised by the test corpus; the enumeration is
+       the full spec set so accreditation-grade inputs are not
+       rejected. -->
+  <xs:simpleType name="ImageCategoryType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="VIS"/>
+      <xs:enumeration value="SL"/>
+      <xs:enumeration value="TI"/>
+      <xs:enumeration value="FL"/>
+      <xs:enumeration value="RD"/>
+      <xs:enumeration value="EO"/>
+      <xs:enumeration value="OP"/>
+      <xs:enumeration value="HR"/>
+      <xs:enumeration value="HS"/>
+      <xs:enumeration value="CP"/>
+      <xs:enumeration value="BP"/>
+      <xs:enumeration value="SAR"/>
+      <xs:enumeration value="SARIQ"/>
+      <xs:enumeration value="IR"/>
+      <xs:enumeration value="MAP"/>
+      <xs:enumeration value="MS"/>
+      <xs:enumeration value="FP"/>
+      <xs:enumeration value="MRI"/>
+      <xs:enumeration value="XRAY"/>
+      <xs:enumeration value="CAT"/>
+      <xs:enumeration value="VD"/>
+      <xs:enumeration value="BARO"/>
+      <xs:enumeration value="CURRENT"/>
+      <xs:enumeration value="DEPTH"/>
+      <xs:enumeration value="WIND"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C PJUST. -->
+  <xs:simpleType name="PixelJustificationType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="R"/>
+      <xs:enumeration value="L"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C ICORDS. Blank (nillable) when image has no
+       geographic location. -->
+  <xs:simpleType name="ImageCoordinateRepresentationType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="D"/>
+      <xs:enumeration value="G"/>
+      <xs:enumeration value="U"/>
+      <xs:enumeration value="N"/>
+      <xs:enumeration value="S"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C IC. -->
+  <xs:simpleType name="ImageCompressionType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="NC"/>
+      <xs:enumeration value="NM"/>
+      <xs:enumeration value="C0"/>
+      <xs:enumeration value="C1"/>
+      <xs:enumeration value="C3"/>
+      <xs:enumeration value="C4"/>
+      <xs:enumeration value="C5"/>
+      <xs:enumeration value="C6"/>
+      <xs:enumeration value="C7"/>
+      <xs:enumeration value="C8"/>
+      <xs:enumeration value="I1"/>
+      <xs:enumeration value="M0"/>
+      <xs:enumeration value="M1"/>
+      <xs:enumeration value="M3"/>
+      <xs:enumeration value="M4"/>
+      <xs:enumeration value="M5"/>
+      <xs:enumeration value="M6"/>
+      <xs:enumeration value="M7"/>
+      <xs:enumeration value="M8"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C IMODE. -->
+  <xs:simpleType name="ImageModeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="B"/>
+      <xs:enumeration value="P"/>
+      <xs:enumeration value="R"/>
+      <xs:enumeration value="S"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C IREPBANDn — band representation. -->
+  <xs:simpleType name="BandRepresentationType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="M"/>
+      <xs:enumeration value="LU"/>
+      <xs:enumeration value="R"/>
+      <xs:enumeration value="G"/>
+      <xs:enumeration value="B"/>
+      <xs:enumeration value="Y"/>
+      <xs:enumeration value="Cb"/>
+      <xs:enumeration value="Cr"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C SFMT — always "C" (CGM) in NITF 2.1. -->
+  <xs:simpleType name="GraphicTypeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="C"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MIL-STD-2500C SCOLOR — Color or Monochrome. -->
+  <xs:simpleType name="GraphicColorType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="C"/>
+      <xs:enumeration value="M"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- FIPS 10-4 / ISO 3166-1 alpha-2 country code used in
+       TargetIdentifier. Two uppercase letters. -->
+  <xs:simpleType name="CountryCodeType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{2}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- =======================================================
+       Bounded NITF 2.1 text fields — maxLength values taken
+       directly from MIL-STD-2500C field-length definitions.
+       Enforcing these rejects oversized strings at validation
+       time, which is a meaningful accreditation constraint.
+       ======================================================= -->
+  <xs:simpleType name="OriginatingStationIDType">
+    <xs:restriction base="xs:string"><xs:maxLength value="10"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="FileTitleType">
+    <xs:restriction base="xs:string"><xs:maxLength value="80"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="OriginatorsNameType">
+    <xs:restriction base="xs:string"><xs:maxLength value="24"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="OriginatorsPhoneNumberType">
+    <xs:restriction base="xs:string"><xs:maxLength value="18"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="ImageIdentifier1Type">
+    <xs:restriction base="xs:string"><xs:maxLength value="10"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="ImageIdentifier2Type">
+    <xs:restriction base="xs:string"><xs:maxLength value="80"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="ImageSourceType">
+    <xs:restriction base="xs:string"><xs:maxLength value="42"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="ImageMagnificationType">
+    <xs:restriction base="xs:string"><xs:maxLength value="4"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="GraphicIdentifierType">
+    <xs:restriction base="xs:string"><xs:maxLength value="10"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="GraphicNameType">
+    <xs:restriction base="xs:string"><xs:maxLength value="20"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="TextIdentifierType">
+    <xs:restriction base="xs:string"><xs:maxLength value="7"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="TextTitleType">
+    <xs:restriction base="xs:string"><xs:maxLength value="80"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="TRETagType">
+    <xs:restriction base="xs:string"><xs:maxLength value="6"/></xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="DESTypeIdentifierType">
+    <xs:restriction base="xs:string"><xs:maxLength value="25"/></xs:restriction>
+  </xs:simpleType>
+
+  <!-- JPEG marker field enumerations. The DFDL jpeg schema
+       (jpeg.dfdl.xsd) translates the raw binary precision and
+       Huffman-class bits into these human-readable strings and
+       raises fn:error on any other value, so the XSD rejects the
+       same set. -->
+  <xs:simpleType name="DQTPrecisionType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="A single byte is used for each quantization value"/>
+      <xs:enumeration value="Two bytes are used for each quantization value"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="DHTClassType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="The Huffman code is for the DC coefficients"/>
+      <xs:enumeration value="The Huffman code is for the AC coefficients"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- =======================================================
+       Reusable complex types
+       ======================================================= -->
+
+  <!-- Daffodil wraps dates as <FileDateAndTime><dateTime2.1>...</>. -->
+  <xs:complexType name="DateTimeWrapperType">
+    <xs:sequence>
+      <xs:element name="dateTime2.1" type="xs:dateTime"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Shared security block — identical shape in file header and
+       every segment subheader. All fields after SecurityClassification
+       are nillable per NITF spec (blank-allowed). -->
+  <xs:complexType name="ClassificationInformationType">
+    <xs:sequence>
+      <xs:element name="SecurityClassification"        type="SecurityClassificationType"/>
+      <xs:element name="SecurityClassificationSystem"  type="xs:string" nillable="true"/>
+      <xs:element name="Codewords"                     type="xs:string" nillable="true"/>
+      <xs:element name="ControlAndHandling"            type="xs:string" nillable="true"/>
+      <xs:element name="ReleasingInstructions"         type="xs:string" nillable="true"/>
+      <xs:element name="DeclassificationType"          type="xs:string" nillable="true"/>
+      <xs:element name="DeclassificationDate"          type="xs:string" nillable="true"/>
+      <xs:element name="DeclassificationExemption"     type="xs:string" nillable="true"/>
+      <xs:element name="Downgrade"                     type="xs:string" nillable="true"/>
+      <xs:element name="DowngradeDate"                 type="xs:string" nillable="true"/>
+      <xs:element name="ClassificationText"            type="xs:string" nillable="true"/>
+      <xs:element name="ClassificationAuthorityType"   type="xs:string" nillable="true"/>
+      <xs:element name="ClassificationAuthority"       type="xs:string" nillable="true"/>
+      <xs:element name="ClassificationReason"          type="xs:string" nillable="true"/>
+      <xs:element name="SecuritySourceDate"            type="xs:string" nillable="true"/>
+      <xs:element name="SecurityControlNumber"         type="xs:string" nillable="true"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- RGB triplet for FileBackgroundColor. -->
+  <xs:complexType name="RGBColorType">
+    <xs:sequence>
+      <xs:element name="Red"   type="HexByteType"/>
+      <xs:element name="Green" type="HexByteType"/>
+      <xs:element name="Blue"  type="HexByteType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Single (HeaderLength, DataLength) pair. The enclosing
+       *SegmentLengths element is itself repeated once per segment
+       (maxOccurs="unbounded" where used). -->
+  <xs:complexType name="SegmentLengthPairType">
+    <xs:sequence>
+      <xs:element name="HeaderLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="DataLength"   type="xs:nonNegativeInteger"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       File Header (NITF root header)
+       ======================================================= -->
+  <xs:complexType name="FileHeaderType">
+    <xs:sequence>
+      <xs:element name="FileProfileName"          type="FileProfileNameType"/>
+      <xs:element name="FileVersion"              type="FileVersionType"/>
+      <xs:element name="ComplexityLevel"          type="xs:nonNegativeInteger"/>
+      <xs:element name="StandardType"             type="StandardTypeType"/>
+      <xs:element name="OriginatingStationID"     type="OriginatingStationIDType"/>
+      <xs:element name="FileDateAndTime"          type="DateTimeWrapperType"/>
+      <xs:element name="FileTitle"                type="FileTitleType"/>
+      <xs:element name="ClassificationInformation" type="ClassificationInformationType"/>
+      <xs:element name="FileCopyNumber"           type="xs:nonNegativeInteger"/>
+      <xs:element name="FileNumberOfCopies"       type="xs:nonNegativeInteger"/>
+      <xs:element name="Encryption"               type="EncryptionType"/>
+      <xs:element name="FileBackgroundColor"      type="RGBColorType"/>
+      <xs:element name="OriginatorsName"          type="OriginatorsNameType"/>
+      <xs:element name="OriginatorsPhoneNumber"   type="OriginatorsPhoneNumberType"/>
+      <xs:element name="FileLength"               type="xs:nonNegativeInteger"/>
+      <xs:element name="FileHeaderLength"         type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfImageSegments"    type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageSegmentLengths"      type="SegmentLengthPairType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="NumberOfGraphicSegments"  type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicSegmentLengths"    type="SegmentLengthPairType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="ReservedForFutureUse"     type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfTextSegments"     type="xs:nonNegativeInteger"/>
+      <xs:element name="TextSegmentLengths"       type="SegmentLengthPairType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="NumberOfDataExtensionSegments"     type="xs:nonNegativeInteger"/>
+      <xs:element name="DataExtensionSegmentLengths"       type="SegmentLengthPairType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="NumberOfReservedExtensionSegments" type="xs:nonNegativeInteger"/>
+      <xs:element name="ReservedExtensionSegmentLengths"   type="SegmentLengthPairType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="UserDefinedHeaderDataLength"  type="xs:nonNegativeInteger"/>
+      <!-- Overflow + TRE block appear only when the corresponding
+           *DataLength field is non-zero. The overflow flag points
+           at a DES index when the TRE data overflows into a DES. -->
+      <xs:element name="UserDefinedHeaderOverflow"    type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="UserDefinedHeaderData"        type="TRESectionType"         minOccurs="0"/>
+      <xs:element name="ExtendedHeaderDataLength"     type="xs:nonNegativeInteger"/>
+      <xs:element name="ExtendedHeaderDataOverflow"   type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="ExtendedHeaderData"           type="TRESectionType"         minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Text Segment
+       ======================================================= -->
+  <xs:complexType name="TextSegmentType">
+    <xs:sequence>
+      <xs:element name="Header" type="TextHeaderType"/>
+      <xs:element name="Data"   type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TextHeaderType">
+    <xs:sequence>
+      <xs:element name="FilePartType">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="TE"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="TextIdentifier"       type="TextIdentifierType"/>
+      <xs:element name="TextAttachmentLevel"  type="xs:nonNegativeInteger"/>
+      <xs:element name="TextDateAndTime"      type="DateTimeWrapperType"/>
+      <xs:element name="TextTitle"            type="TextTitleType"/>
+      <xs:element name="ClassificationInformation" type="ClassificationInformationType"/>
+      <xs:element name="Encryption"           type="EncryptionType"/>
+      <xs:element name="TextFormat"           type="TextFormatType"/>
+      <xs:element name="TextExtendedSubheaderDataLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="TextExtendedSubheaderOverflow"   type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="TextExtendedSubheaderData" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element ref="TaggedRecordExtensions"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Image Segment
+       ======================================================= -->
+  <xs:complexType name="ImageSegmentType">
+    <xs:sequence>
+      <xs:element name="Header" type="ImageHeaderType"/>
+      <xs:element name="Data"   type="ImageDataType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Target identifier block — three nillable sub-fields. -->
+  <xs:complexType name="TargetIdentifierType">
+    <xs:sequence>
+      <xs:element name="BasicEncyclopediaIdentifier" type="xs:string"      nillable="true"/>
+      <xs:element name="FacilityOSuffix"             type="xs:string"      nillable="true"/>
+      <xs:element name="CountryCode"                 type="CountryCodeType" nillable="true"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- (Row, Column) pixel position. -->
+  <xs:complexType name="RowColumnType">
+    <xs:sequence>
+      <xs:element name="Row"    type="xs:nonNegativeInteger"/>
+      <xs:element name="Column" type="xs:nonNegativeInteger"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Per-band LUT entry counts: one <Value> per LUT. -->
+  <xs:complexType name="LUTEntryCountsType">
+    <xs:sequence>
+      <xs:element name="Value" type="xs:nonNegativeInteger"
+                  minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="BandType">
+    <xs:sequence>
+      <xs:element name="Representation"          type="BandRepresentationType" nillable="true"/>
+      <xs:element name="Subcategory"             type="xs:string" nillable="true"/>
+      <xs:element name="ImageFilterCondition">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="N"/>
+            <xs:enumeration value="E"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="StandardImageFilterCode" type="xs:string" nillable="true"/>
+      <xs:element name="NumberOfLUTS"            type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfLUTEntries"      type="LUTEntryCountsType" minOccurs="0"/>
+      <xs:element name="LUT"                     type="HexBlobType"
+                  minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="BandsType">
+    <xs:sequence>
+      <xs:element name="Band" type="BandType" minOccurs="1" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ImageSegment header. Field order per NITF 2.1 spec. -->
+  <xs:complexType name="ImageHeaderType">
+    <xs:sequence>
+      <xs:element name="FilePartType">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="IM"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="ImageIdentifier1"       type="ImageIdentifier1Type"/>
+      <xs:element name="ImageDateAndTime"       type="DateTimeWrapperType"/>
+      <xs:element name="TargetIdentifier"       type="TargetIdentifierType"/>
+      <xs:element name="ImageIdentifier2"       type="ImageIdentifier2Type"/>
+      <xs:element name="ClassificationInformation" type="ClassificationInformationType"/>
+      <xs:element name="Encryption"             type="EncryptionType"/>
+      <xs:element name="ImageSource"            type="ImageSourceType" nillable="true"/>
+      <xs:element name="NumberOfSignificantRowsInImage"    type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfSignificantColumnsInImage" type="xs:nonNegativeInteger"/>
+      <xs:element name="PixelValueType"         type="PixelValueTypeType"/>
+      <xs:element name="ImageRepresentation"    type="ImageRepresentationType"/>
+      <xs:element name="ImageCategory"          type="ImageCategoryType"/>
+      <xs:element name="ActualBitsPerPixelPerBand" type="xs:nonNegativeInteger"/>
+      <xs:element name="PixelJustification"     type="PixelJustificationType"/>
+      <xs:element name="ImageCoordinateRepresentation" type="ImageCoordinateRepresentationType" nillable="true"/>
+      <xs:element name="ImageGeographicLocation" type="ImageGeographicLocationType" minOccurs="0"/>
+      <xs:element name="NumberOfImageComments"  type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageComment"           type="xs:string"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="ImageCompression"       type="ImageCompressionType"/>
+      <xs:element name="CompressionRateCode"    type="xs:string" minOccurs="0"/>
+      <xs:element name="NumberOfBands"          type="xs:nonNegativeInteger"/>
+      <!-- Present when NumberOfBands=0 (more than 9 bands). -->
+      <xs:element name="NumberOfMultispectralBands" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Value" type="xs:nonNegativeInteger"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="Bands"                  type="BandsType"/>
+      <xs:element name="ImageSyncCode"          type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageMode"              type="ImageModeType"/>
+      <xs:element name="NumberOfBlocksPerRow"           type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfBlocksPerColumn"        type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfPixelsPerBlockHorizontal" type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfPixelsPerBlockVertical"   type="xs:nonNegativeInteger"/>
+      <xs:element name="NumberOfBitsPerPixelPerBand"      type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageDisplayLevel"      type="xs:nonNegativeInteger"/>
+      <xs:element name="AttachmentLevel"        type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageLocation"          type="RowColumnType"/>
+      <xs:element name="ImageMagnification"     type="ImageMagnificationType"/>
+      <xs:element name="UserDefinedImageDataLength"    type="xs:nonNegativeInteger"/>
+      <!-- Per DFDL: the image-level user-defined overflow is named
+           "UserDefinedOverflow" (without the "Image" infix) while
+           the data element is "UserDefinedImageData". -->
+      <xs:element name="UserDefinedOverflow"            type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="UserDefinedImageData"           type="TRESectionType"         minOccurs="0"/>
+      <xs:element name="ImageExtendedSubheaderDataLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="ImageExtendedSubheaderOverflow" type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="ImageExtendedSubheaderData"     type="TRESectionType"         minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Tagged Record Extension (TRE) wrapper used by all
+       ExtendedHeaderData / ImageExtendedSubheaderData /
+       UserDefinedHeaderData / UserDefinedImageData blocks. The
+       <nitf:TaggedRecordExtensions> element is in the urn:nitf:2.1
+       namespace (that's how Daffodil emits it); its children are
+       in no namespace. -->
+  <xs:complexType name="TRESectionType">
+    <xs:sequence>
+      <xs:element ref="TaggedRecordExtensions"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Data Extension Segment (DES)
+
+       Two flavours: a TRE overflow DES (UniqueDESTypeIdentifier =
+       "TRE_OVERFLOW") whose Data is <nitf:TaggedRecordExtensions>,
+       and a generic DES whose Data is a hex-encoded blob
+       (<DESUserDefinedData>). Not exercised by the current test
+       corpus; shape lifted directly from the NITF 2.1 DFDL schema
+       (lines 650-686).
+       ======================================================= -->
+  <xs:complexType name="DataExtensionSegmentType">
+    <xs:sequence>
+      <xs:element name="Header" type="DESHeaderType"/>
+      <xs:element name="Data"   type="DESDataType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DESHeaderType">
+    <xs:sequence>
+      <xs:element name="FilePartType">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="DE"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="UniqueDESTypeIdentifier"      type="DESTypeIdentifierType"/>
+      <xs:element name="VersionOfTheDataDefinition"   type="xs:nonNegativeInteger"/>
+      <xs:element name="ClassificationInformation"    type="ClassificationInformationType"/>
+      <!-- Overflow-specific fields appear only when the DES
+           carries a TRE overflow. -->
+      <xs:element name="DESOverflowedHeaderType"      type="xs:string"           minOccurs="0"/>
+      <xs:element name="DESDataItemOverflowed"        type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="DESUserDefinedSubheaderLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="DESUserDefinedSubheaderFields" type="xs:string"           minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DESDataType">
+    <xs:choice>
+      <xs:element ref="TaggedRecordExtensions"/>
+      <xs:element name="DESUserDefinedData" type="HexBlobType"/>
+    </xs:choice>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Reserved Extension Segment (RES)
+       ======================================================= -->
+  <xs:complexType name="ReservedExtensionSegmentType">
+    <xs:sequence>
+      <xs:element name="Header" type="RESHeaderType"/>
+      <xs:element name="Data"   type="RESDataType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RESHeaderType">
+    <xs:sequence>
+      <xs:element name="FilePartType">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="RE"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="UniqueRESTypeIdentifier"      type="DESTypeIdentifierType"/>
+      <xs:element name="VersionOfTheDataDefinition"   type="xs:nonNegativeInteger"/>
+      <xs:element name="ClassificationInformation"    type="ClassificationInformationType"/>
+      <xs:element name="RESUserDefinedSubheaderLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="RESUserDefinedSubheaderFields" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="RESDataType">
+    <xs:sequence>
+      <xs:element name="RESUserDefinedData" type="HexBlobType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="TaggedRecordExtensions">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="TaggedRecordExtension" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="UniqueExtensionTypeIdentifier" type="TRETagType"/>
+              <xs:element name="LengthOfData"    type="xs:nonNegativeInteger"/>
+              <xs:element name="UserDefinedData" type="BlobPayloadWrapperType"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- ImageSegment data block. The inner wrapper element depends
+       on the ImageCompression value (NC -> NoCompression, C3 -> JPEG,
+       etc.). Additional variants added as the test corpus hits them.
+       BlobPayload holds the out-of-line reference: cds:blob:N in
+       envelopes, file:// URI when Daffodil emits directly. -->
+  <xs:simpleType name="BlobReferenceType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="(cds:blob:[0-9]+|file:.*)"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Daffodil externalizes large payloads as blob sidecar files and
+       emits <BlobPayload>cds:blob:N</BlobPayload>; small payloads are
+       inlined and emitted as <HexBinaryPayload>AABBCC...</HexBinaryPayload>.
+       Both must be accepted by the schema. -->
+  <xs:complexType name="BlobPayloadWrapperType">
+    <xs:choice>
+      <xs:element name="BlobPayload"      type="BlobReferenceType"/>
+      <xs:element name="HexBinaryPayload" type="xs:hexBinary"/>
+    </xs:choice>
+  </xs:complexType>
+
+  <xs:complexType name="ImageDataType">
+    <xs:sequence>
+      <xs:element name="MaskTable"     type="MaskTableType" minOccurs="0"/>
+      <xs:element name="PayloadLength" type="xs:nonNegativeInteger"/>
+      <xs:choice>
+        <xs:element name="NoCompression"      type="BlobPayloadWrapperType"/>
+        <xs:element name="BiLevel"            type="BlobPayloadWrapperType"/>
+        <xs:element name="JPEG2000"           type="BlobPayloadWrapperType"/>
+        <xs:element name="VectorQuantization" type="BlobPayloadWrapperType"/>
+        <xs:element name="JFIF"              type="JFIFType"/>
+      </xs:choice>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Masked image mask table. Present when ImageCompression=NM
+       (or any other compression with an 'M' qualifier). Block mask
+       records appear when BlockMaskRecordLength > 0; pad pixel
+       mask records appear when PadPixelMaskRecordLength > 0. -->
+  <xs:complexType name="MaskTableType">
+    <xs:sequence>
+      <xs:element name="BlockedImageDataOffset"   type="xs:nonNegativeInteger"/>
+      <xs:element name="BlockMaskRecordLength"    type="xs:nonNegativeInteger"/>
+      <xs:element name="PadPixelMaskRecordLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="PadOutputPixelCodeLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="PadOutputPixelCode" minOccurs="0">
+        <xs:complexType>
+          <xs:choice>
+            <xs:element name="BiLevel"        type="xs:nonNegativeInteger"/>
+            <xs:element name="Integer"        type="xs:nonNegativeInteger"/>
+            <xs:element name="SignedInteger"  type="xs:integer"/>
+            <xs:element name="Float"          type="xs:float"/>
+            <xs:element name="Double"         type="xs:double"/>
+            <!-- Complex pixel type (C): Real and Imaginary parts. -->
+            <xs:sequence>
+              <xs:element name="Real"      type="xs:float"/>
+              <xs:element name="Imaginary" type="xs:float"/>
+            </xs:sequence>
+          </xs:choice>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="BlockMaskRecord"    type="xs:nonNegativeInteger"
+                  minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="PadPixelMaskRecord" type="xs:nonNegativeInteger"
+                  minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Graphic Segment (CGM graphics)
+       ======================================================= -->
+  <xs:complexType name="GraphicSegmentType">
+    <xs:sequence>
+      <xs:element name="Header" type="GraphicHeaderType"/>
+      <xs:element name="Data"   type="HexBlobType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="GraphicHeaderType">
+    <xs:sequence>
+      <xs:element name="FilePartType">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="SY"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="GraphicIdentifier"         type="GraphicIdentifierType"/>
+      <xs:element name="GraphicName"               type="GraphicNameType"/>
+      <xs:element name="ClassificationInformation" type="ClassificationInformationType"/>
+      <xs:element name="Encryption"                type="EncryptionType"/>
+      <xs:element name="GraphicType"               type="GraphicTypeType"/>
+      <xs:element name="ReservedForFutureUse1"     type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicDisplayLevel"       type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicAttachmentLevel"    type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicLocation"           type="RowColumnType"/>
+      <xs:element name="FirstGraphicBoundLocation" type="RowColumnType"/>
+      <xs:element name="GraphicColor"              type="GraphicColorType"/>
+      <xs:element name="SecondGraphicBoundLocation" type="RowColumnType"/>
+      <xs:element name="ReservedForFutureUse2"     type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicExtendedSubheaderDataLength" type="xs:nonNegativeInteger"/>
+      <xs:element name="GraphicExtendedSubheaderOverflow"   type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="GraphicExtendedSubheaderData" minOccurs="0">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element ref="TaggedRecordExtensions"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       JFIF (JPEG) image data
+
+       The DFDL schema exposes the JPEG structure as a sequence of
+       marker Segments. Each Segment wraps exactly one marker
+       variant. The set of marker types here matches what the
+       current test corpus exercises; additional marker types
+       (APP0, APP1, DNL, etc.) can be added to the Segment choice
+       when encountered.
+       ======================================================= -->
+  <xs:complexType name="JFIFType">
+    <xs:sequence>
+      <xs:element name="Segment" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:choice>
+            <xs:element name="SOI"  type="EmptyMarkerType"/>
+            <xs:element name="EOI"  type="EmptyMarkerType"/>
+            <xs:element name="RST0" type="EmptyMarkerType"/>
+            <xs:element name="RST1" type="EmptyMarkerType"/>
+            <xs:element name="RST2" type="EmptyMarkerType"/>
+            <xs:element name="RST3" type="EmptyMarkerType"/>
+            <xs:element name="RST4" type="EmptyMarkerType"/>
+            <xs:element name="RST5" type="EmptyMarkerType"/>
+            <xs:element name="RST6" type="EmptyMarkerType"/>
+            <xs:element name="RST7" type="EmptyMarkerType"/>
+            <xs:element name="APP6" type="APPMarkerType"/>
+            <xs:element name="COM"  type="COMMarkerType"/>
+            <xs:element name="DQT"  type="DQTMarkerType"/>
+            <xs:element name="DHT"  type="DHTMarkerType"/>
+            <xs:element name="DRI"  type="DRIMarkerType"/>
+            <xs:element name="SOF0" type="SOF0MarkerType"/>
+            <xs:element name="SOS"  type="SOSMarkerType"/>
+            <xs:element name="DataBlob" type="HexBlobType"/>
+          </xs:choice>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Standalone markers — no payload. -->
+  <xs:complexType name="EmptyMarkerType"/>
+
+  <!-- APPn application markers: length + hex-encoded bytes. -->
+  <xs:complexType name="APPMarkerType">
+    <xs:sequence>
+      <xs:element name="Length"   type="xs:nonNegativeInteger"/>
+      <xs:element name="APP-data" type="HexBlobType"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Comment marker. -->
+  <xs:complexType name="COMMarkerType">
+    <xs:sequence>
+      <xs:element name="Length" type="xs:nonNegativeInteger"/>
+      <xs:element name="Text"   type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- DQT — quantization tables. -->
+  <xs:complexType name="DQTMarkerType">
+    <xs:sequence>
+      <xs:element name="Length" type="xs:nonNegativeInteger"/>
+      <xs:element name="Quantization_Tables">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Table" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="Precision"              type="DQTPrecisionType"/>
+                  <xs:element name="Destination_Identifier" type="xs:nonNegativeInteger"/>
+                  <xs:element name="Elements">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="Index" type="xs:nonNegativeInteger"
+                                    minOccurs="1" maxOccurs="unbounded"/>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- DHT — Huffman tables. -->
+  <xs:complexType name="DHTMarkerType">
+    <xs:sequence>
+      <xs:element name="Length" type="xs:nonNegativeInteger"/>
+      <xs:element name="Huffman_Tables">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Table" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="Class"                  type="DHTClassType"/>
+                  <xs:element name="Destination_Identifier" type="xs:nonNegativeInteger"/>
+                  <xs:element name="Huffman_Code">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="Lengths">
+                          <xs:complexType>
+                            <xs:sequence>
+                              <xs:element name="Length" maxOccurs="unbounded">
+                                <xs:complexType>
+                                  <xs:sequence>
+                                    <xs:element name="Value" type="xs:nonNegativeInteger"/>
+                                  </xs:sequence>
+                                </xs:complexType>
+                              </xs:element>
+                            </xs:sequence>
+                          </xs:complexType>
+                        </xs:element>
+                        <xs:element name="Values" minOccurs="0">
+                          <xs:complexType>
+                            <xs:sequence>
+                              <xs:element name="Value" type="HexOrEmptyType"
+                                          minOccurs="0" maxOccurs="unbounded"/>
+                            </xs:sequence>
+                          </xs:complexType>
+                        </xs:element>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- DRI — restart interval. -->
+  <xs:complexType name="DRIMarkerType">
+    <xs:sequence>
+      <xs:element name="Length"           type="xs:nonNegativeInteger"/>
+      <xs:element name="Restart_Interval" type="xs:nonNegativeInteger"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- SOF0 — baseline frame header. -->
+  <xs:complexType name="SOF0MarkerType">
+    <xs:sequence>
+      <xs:element name="Length"                           type="xs:nonNegativeInteger"/>
+      <xs:element name="Precision"                        type="xs:nonNegativeInteger"/>
+      <xs:element name="Number_of_Lines_in_Source_Image"  type="xs:nonNegativeInteger"/>
+      <xs:element name="Number_of_Samples_per_Line"       type="xs:nonNegativeInteger"/>
+      <xs:element name="Number_of_Source_Image_Components_in_the_Frame"
+                                                           type="xs:nonNegativeInteger"/>
+      <xs:element name="Image_Components_in_Frame">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Image_Component" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="Component_Identifier"       type="xs:nonNegativeInteger"/>
+                  <xs:element name="Horizontal_Sampling_Factor" type="xs:nonNegativeInteger"/>
+                  <xs:element name="Vertical_Sampling_Factor"   type="xs:nonNegativeInteger"/>
+                  <xs:element name="Quantization_Table_Selector" type="xs:nonNegativeInteger"/>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- SOS — start of scan. -->
+  <xs:complexType name="SOSMarkerType">
+    <xs:sequence>
+      <xs:element name="Length"                                 type="xs:nonNegativeInteger"/>
+      <xs:element name="Number_of_Image_Components_in_Scan"     type="xs:nonNegativeInteger"/>
+      <xs:element name="Image_Components_in_Scan">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Image_Component" maxOccurs="unbounded">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="Scan_Component_Selector"            type="xs:nonNegativeInteger"/>
+                  <xs:element name="DC_Entropy_Coding_Table_Selector"   type="xs:nonNegativeInteger"/>
+                  <xs:element name="AC_Entropy_Coding_Table_Selector"   type="xs:nonNegativeInteger"/>
+                </xs:sequence>
+              </xs:complexType>
+            </xs:element>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+      <xs:element name="Start_of_Spectral_or_Predictor_Selection" type="xs:nonNegativeInteger"/>
+      <xs:element name="End_of_Spectral_or_Predictor_Selection"   type="xs:nonNegativeInteger"/>
+      <xs:element name="Successive_Approximation_Bit_Position_High" type="xs:nonNegativeInteger"/>
+      <xs:element name="Successive_Approximation_Bit_Position_Low_or_Point_Transform"
+                                                                     type="xs:nonNegativeInteger"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- =======================================================
+       Image Geographic Location
+
+       The wrapper element under <ImageGeographicLocation> depends
+       on <ImageCoordinateRepresentation>:
+         D -> DecimalDegrees
+         G -> Geographic (DMS with hemisphere indicators)
+         U -> MilitaryGridReferenceSystem (MGRS)
+         N -> NorthernHemisphere (UTM)
+         S -> SouthernHemisphere (UTM)
+       Each wrapper holds exactly four <Corner> elements.
+       ======================================================= -->
+  <xs:complexType name="ImageGeographicLocationType">
+    <xs:choice>
+      <xs:element name="DecimalDegrees"              type="DecimalDegreesCornersType"/>
+      <xs:element name="Geographic"                  type="GeographicCornersType"/>
+      <xs:element name="MilitaryGridReferenceSystem" type="MGRSCornersType"/>
+      <xs:element name="NorthernHemisphere"          type="UTMCornersType"/>
+      <xs:element name="SouthernHemisphere"          type="UTMCornersType"/>
+    </xs:choice>
+  </xs:complexType>
+
+  <!-- DecimalDegrees — signed decimal strings like "+32.984". -->
+  <xs:complexType name="DecimalDegreesCornersType">
+    <xs:sequence>
+      <xs:element name="Corner" minOccurs="4" maxOccurs="4">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Latitude"  type="DecimalLatType"/>
+            <xs:element name="Longitude" type="DecimalLonType"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- Geographic — degrees/minutes/seconds with N/S, E/W indicators. -->
+  <xs:complexType name="DMSLatitudeType">
+    <xs:sequence>
+      <xs:element name="Degrees"    type="xs:nonNegativeInteger"/>
+      <xs:element name="Minutes"    type="xs:nonNegativeInteger"/>
+      <xs:element name="Seconds"    type="xs:nonNegativeInteger"/>
+      <xs:element name="NorthSouth">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="N"/>
+            <xs:enumeration value="S"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="DMSLongitudeType">
+    <xs:sequence>
+      <xs:element name="Degrees"   type="xs:nonNegativeInteger"/>
+      <xs:element name="Minutes"   type="xs:nonNegativeInteger"/>
+      <xs:element name="Seconds"   type="xs:nonNegativeInteger"/>
+      <xs:element name="EastWest">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="E"/>
+            <xs:enumeration value="W"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="GeographicCornersType">
+    <xs:sequence>
+      <xs:element name="Corner" minOccurs="4" maxOccurs="4">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Latitude"  type="DMSLatitudeType"/>
+            <xs:element name="Longitude" type="DMSLongitudeType"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- MGRS — Zone, latitude Band, 100km grid square J/K, then
+       Easting/Northing within the square. -->
+  <xs:complexType name="MGRSCornersType">
+    <xs:sequence>
+      <xs:element name="Corner" minOccurs="4" maxOccurs="4">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Zone"     type="UTMZoneType"/>
+            <xs:element name="Band"     type="MGRSBandType"/>
+            <xs:element name="J"        type="MGRSGridLetterType"/>
+            <xs:element name="K"        type="MGRSGridLetterType"/>
+            <xs:element name="Easting"  type="xs:nonNegativeInteger"/>
+            <xs:element name="Northing" type="xs:nonNegativeInteger"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- UTM — shared by NorthernHemisphere and SouthernHemisphere
+       wrappers. -->
+  <xs:complexType name="UTMCornersType">
+    <xs:sequence>
+      <xs:element name="Corner" minOccurs="4" maxOccurs="4">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="Zone"     type="UTMZoneType"/>
+            <xs:element name="Easting"  type="xs:nonNegativeInteger"/>
+            <xs:element name="Northing" type="xs:nonNegativeInteger"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>
