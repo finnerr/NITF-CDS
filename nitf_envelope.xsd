@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Tyler Finn.
+Part of the NITF-over-CDS project.
+
+CDS envelope schema for NITF transport.
+
+Wraps Daffodil's NITF XML output in a self-contained document that the
+CDS validates and inspects. See PROJECT.md for the data path.
+
+Element order (Manifest before Blobs before Payload) is deliberate:
+a streaming validator sees hashes first, then verifies blob bytes as
+they arrive, and can abort the stream before Payload is forwarded if
+policy rejects.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:cds:nitf:1"
+           xmlns:nitf="urn:nitf:2.1"
+           targetNamespace="urn:cds:nitf:1"
+           elementFormDefault="qualified">
+
+  <!--
+    Import the NITF payload schema so the guard's validator can type-check
+    the Payload subtree. The schemaLocation is a hint; the CDS can point
+    this at whatever local copy it trusts.
+  -->
+  <xs:import namespace="urn:nitf:2.1" schemaLocation="nitf.dfdl.xsd"/>
+
+  <xs:element name="NitfMessage">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Manifest" type="ManifestType"/>
+        <xs:element name="Blobs"    type="BlobsType" minOccurs="0"/>
+        <xs:element name="Payload"  type="PayloadType"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:string" use="required" fixed="1"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="ManifestType">
+    <xs:sequence>
+      <xs:element name="Blob" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="index"  type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="size"   type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="sha256" use="required">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:pattern value="[0-9a-f]{64}"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="BlobsType">
+    <xs:sequence>
+      <xs:element name="BlobData" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:simpleContent>
+            <xs:extension base="xs:base64Binary">
+              <xs:attribute name="index" type="xs:nonNegativeInteger" use="required"/>
+            </xs:extension>
+          </xs:simpleContent>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="PayloadType">
+    <xs:sequence>
+      <!--
+        The Daffodil NITF root element lives in namespace urn:nitf:2.1.
+        We wildcard here so this schema does not have to redeclare the
+        entire NITF structure; the imported schema provides the strict
+        type-check the CDS can apply separately if desired.
+      -->
+      <xs:any namespace="urn:nitf:2.1" processContents="strict"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

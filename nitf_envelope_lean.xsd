@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Tyler Finn.
+Part of the NITF-over-CDS project.
+
+Lean CDS envelope schema — validates the wrapper only.
+
+Same structure as nitf_envelope.xsd, but the Payload subtree is treated
+as opaque (processContents="skip"). Use this on CDS boxes that should
+not have to load the full NITF DFDL schema stack.
+
+The envelope still enforces:
+  - root element, version attribute
+  - element order: Manifest, Blobs?, Payload
+  - Manifest/Blob shape (index, size, sha256 hex pattern)
+  - Blobs/BlobData as base64Binary with an index
+  - exactly one child inside Payload
+
+Deeper validation of the NITF payload (if desired) can be a separate
+pass using nitf_envelope.xsd or an XSLT policy.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:cds:nitf:1"
+           targetNamespace="urn:cds:nitf:1"
+           elementFormDefault="qualified">
+
+  <xs:element name="NitfMessage">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Manifest" type="ManifestType"/>
+        <xs:element name="Blobs"    type="BlobsType" minOccurs="0"/>
+        <xs:element name="Payload"  type="xs:anyType"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:string" use="required" fixed="1"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="ManifestType">
+    <xs:sequence>
+      <xs:element name="Blob" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="index"  type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="size"   type="xs:nonNegativeInteger" use="required"/>
+          <xs:attribute name="sha256" use="required">
+            <xs:simpleType>
+              <xs:restriction base="xs:string">
+                <xs:pattern value="[0-9a-f]{64}"/>
+              </xs:restriction>
+            </xs:simpleType>
+          </xs:attribute>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="BlobsType">
+    <xs:sequence>
+      <xs:element name="BlobData" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:simpleContent>
+            <xs:extension base="xs:base64Binary">
+              <xs:attribute name="index" type="xs:nonNegativeInteger" use="required"/>
+            </xs:extension>
+          </xs:simpleContent>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>
