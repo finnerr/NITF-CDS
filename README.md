@@ -249,23 +249,6 @@ above, start the flow.
   load the entire envelope into memory (ElementTree DOM + full base64
   string). Needs a streaming rewrite (lxml iterparse or SAX) before any
   real-world NITFs above a few hundred MB are attempted.
-- [ ] **NiFi integration.** Production flow is NiFi on both sides:
-  `GetFile` → (tar.gz extract) → our `nitf_send.py` → `PutTCP`, and
-  `ListenTCP` → our `nitf_recv.py` → `UpdateAttribute` → `PutFile`.
-  Need NiFi-friendly wrappers (tar.gz input, explicit output paths).
-- [ ] **Envelope XSD validation.** `nitf_envelope.xsd` exists but is not
-  yet called by either script for defense-in-depth validation.
-- [ ] **Policy / inspection layer.** Draft `nitf_policy.xsl` for the guard
-  to enforce classification, TRE allowlists, DES type allowlists, etc.
-- [ ] **Upstream schema round-trip gaps.** `FileLength` and
-  `FileHeaderLength` are marked TODO in the DFDL schema
-  (`nitf.dfdl.xsd:117,124`). Fixing these with `outputValueCalc` would
-  recover `i_3114e` and `i_3117ax`.
-- [ ] **JPEG round-trip.** `i_3015a` byte-differs after round-trip
-  (same size, internal bytes differ). Investigate whether the JFIF DFDL
-  schema re-serializes with different marker padding.
-- [ ] **TCP transport.** Decide whether NiFi's `PutTCP`/`ListenTCP` fully
-  handles transport or whether we need our own socket wrappers.
 
 ## License / attribution
 
