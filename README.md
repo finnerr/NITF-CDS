@@ -28,7 +28,7 @@ nitf_send.groovy                                         nitf_recv.groovy
 · inline XML into <Payload>                           · rewrite cds:blob:N URIs
 · build <NitfMessage> envelope                        · Daffodil unparse → .ntf
   │                                                               ▲
-  └──────────── TCP ───── <NitfMessage> ────── TCP ──────────────┘
+  └──────────── TCP ───── <NitfMessage> ────── TCP ───────────────┘
 ```
 
 Element order in the envelope matters: `Manifest` first (guard knows expected hashes before bytes arrive), `Blobs` second (stream verification), `Payload` last (policy can abort before anything leaks downstream).
