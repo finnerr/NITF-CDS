@@ -16,6 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 import org.apache.daffodil.api.Daffodil
@@ -23,6 +24,9 @@ import org.apache.daffodil.api.DataProcessor
 
 @Field static final AtomicReference<DataProcessor> DP_REF = new AtomicReference<>()
 @Field static final Object COMPILE_LOCK = new Object()
+// Counts threads currently inside unparse. Must stay ≤ 1 (same DataProcessor
+// instance is reused; Daffodil unparse is not thread-safe for concurrent calls).
+@Field static final AtomicInteger ACTIVE_UNPARSES = new AtomicInteger(0)
 
 def getProcessor(String schemaPath) {
     def dp = DP_REF.get()
@@ -30,6 +34,7 @@ def getProcessor(String schemaPath) {
     synchronized (COMPILE_LOCK) {
         dp = DP_REF.get()
         if (dp != null) return dp
+        Thread.currentThread().setContextClassLoader(Daffodil.class.classLoader)
         def compiler = Daffodil.compiler()
         def pf = compiler.compileFile(new File(schemaPath))
         if (pf.isError()) {
@@ -51,16 +56,34 @@ def sha256Hex(byte[] bytes) {
     md.digest(bytes).collect { String.format("%02x", it) }.join()
 }
 
+def deleteDirRecursive(File dir) {
+    dir.eachFileRecurse { it.delete() }
+    dir.delete()
+}
+
 // ---- entrypoint ----
 def flowFile = session.get()
 if (flowFile == null) return
 
 def schemaPath = context.getProperty('Schema Path').evaluateAttributeExpressions(flowFile).getValue()
+if (!schemaPath) {
+    log.error("nitf_recv: 'Schema Path' processor property is not set")
+    session.transfer(flowFile, REL_FAILURE)
+    return
+}
 
+// MEMORY NOTE: the entire XML envelope (including base64-encoded blobs) is
+// loaded into a single String. Peak heap usage is ~3× the raw NITF size.
+// Set NiFi JVM heap in bootstrap.conf to accommodate the largest expected
+// file × 3. A streaming StAX rewrite is required for multi-GB files.
 Path blobDir = Files.createTempDirectory("nitf-recv-blobs-")
+if (ACTIVE_UNPARSES.incrementAndGet() > 1) {
+    ACTIVE_UNPARSES.decrementAndGet()
+    throw new RuntimeException(
+        "nitf_recv: concurrent unparse attempted — Concurrent Tasks must be 1")
+}
 try {
-    // Read the entire envelope into memory. For multi-GB NITFs, swap
-    // this out for a StAX-based streaming parse.
+    // Read the entire envelope into memory.
     String envelope = null
     session.read(flowFile, { InputStream input ->
         envelope = input.getText("UTF-8")
@@ -90,6 +113,9 @@ try {
             int idx = idxStr as int
             byte[] bytes = Base64.decoder.decode(body.replaceAll(/\s+/, ''))
             def expected = manifest[idx]?.sha256
+            if (expected == null) {
+                throw new RuntimeException("Blob ${idx} present in <Blobs> but missing from <Manifest>")
+            }
             def actual = sha256Hex(bytes)
             if (expected != actual) {
                 throw new RuntimeException("Hash mismatch on blob ${idx}: expected ${expected}, got ${actual}")
@@ -99,8 +125,15 @@ try {
             blobFiles[idx] = bf
         }
     }
+    if (blobFiles.size() != manifest.size()) {
+        throw new RuntimeException(
+            "Blob count mismatch: manifest declares ${manifest.size()} blobs, envelope contains ${blobFiles.size()}")
+    }
 
     // ---- extract payload subtree ----
+    // Payload is inline DFDL infoset XML. Send side inserts xmlns=""
+    // on the NITF root so children stay unqualified when inlined
+    // inside the envelope; Daffodil's unparser accepts that as-is.
     def payloadMatcher = (envelope =~ /(?s)<Payload>\s*(.*?)\s*<\/Payload>/)
     if (!payloadMatcher.find()) {
         throw new RuntimeException("Envelope has no <Payload>")
@@ -135,5 +168,8 @@ try {
     log.error("nitf_recv: " + t.message, t)
     session.transfer(flowFile, REL_FAILURE)
 } finally {
-    try { blobDir.toFile().eachFile { it.delete() }; blobDir.toFile().delete() } catch (ignored) {}
+    ACTIVE_UNPARSES.decrementAndGet()
+    try { deleteDirRecursive(blobDir.toFile()) } catch (Throwable t) {
+        log.warn("nitf_recv: failed to clean up blob tempdir ${blobDir}: ${t.message}")
+    }
 }

@@ -20,6 +20,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 import org.apache.daffodil.api.Daffodil
@@ -27,6 +28,9 @@ import org.apache.daffodil.api.DataProcessor
 
 @Field static final AtomicReference<DataProcessor> DP_REF = new AtomicReference<>()
 @Field static final Object COMPILE_LOCK = new Object()
+// Counts threads currently inside parse. Must stay ≤ 1. user.dir manipulation
+// below is JVM-global; a second concurrent thread would corrupt blob paths.
+@Field static final AtomicInteger ACTIVE_PARSES = new AtomicInteger(0)
 
 def getProcessor(String schemaPath) {
     def dp = DP_REF.get()
@@ -34,6 +38,7 @@ def getProcessor(String schemaPath) {
     synchronized (COMPILE_LOCK) {
         dp = DP_REF.get()
         if (dp != null) return dp
+        Thread.currentThread().setContextClassLoader(Daffodil.class.classLoader)
         def compiler = Daffodil.compiler()
         def pf = compiler.compileFile(new File(schemaPath))
         if (pf.isError()) {
@@ -55,19 +60,32 @@ def sha256Hex(byte[] bytes) {
     md.digest(bytes).collect { String.format("%02x", it) }.join()
 }
 
-def xmlEscape(String s) {
-    s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-     .replace("\"", "&quot;").replace("'", "&apos;")
+def deleteDirRecursive(File dir) {
+    dir.eachFileRecurse { it.delete() }
+    dir.delete()
 }
 
 // ---- entrypoint ----
 def flowFile = session.get()
 if (flowFile == null) return
 
-def schemaPath   = context.getProperty('Schema Path').evaluateAttributeExpressions(flowFile).getValue()
-def maxBinSize   = (context.getProperty('Max Binary Size').evaluateAttributeExpressions(flowFile).getValue() ?: '0')
+def schemaPath = context.getProperty('Schema Path').evaluateAttributeExpressions(flowFile).getValue()
+if (!schemaPath) {
+    log.error("nitf_send: 'Schema Path' processor property is not set")
+    session.transfer(flowFile, REL_FAILURE)
+    return
+}
+def maxBinSize = (context.getProperty('Max Binary Size').evaluateAttributeExpressions(flowFile).getValue() ?: '0')
 
+// MEMORY NOTE: parse output, rewritten XML, and envelope StringBuilder are all
+// held in heap simultaneously. Peak usage is ~3× the raw NITF size. Set NiFi
+// JVM heap in bootstrap.conf to accommodate the largest expected file × 3.
 Path blobDir = Files.createTempDirectory("nitf-blobs-")
+if (ACTIVE_PARSES.incrementAndGet() > 1) {
+    ACTIVE_PARSES.decrementAndGet()
+    throw new RuntimeException(
+        "nitf_send: concurrent parse attempted — Concurrent Tasks must be 1 (user.dir is JVM-global)")
+}
 try {
     def dp = getProcessor(schemaPath)
     def extVars = new HashMap<String, String>()
@@ -135,8 +153,17 @@ try {
         }
         out << '  </Blobs>\n'
     }
-    out << '  <Payload>\n'
-    out << rewritten
+    // Inline the DFDL infoset under <Payload>. Reset the default
+    // namespace on the NITF root so children stay unqualified
+    // (Daffodil emits them that way) when inlined inside
+    // <NitfMessage xmlns="urn:cds:nitf:1">. Without this, children
+    // would inherit the envelope namespace and break validation
+    // against nitf_infoset_v21.xsd.
+    def inlinePayload = rewritten.replaceFirst(
+        /<nitf:NITF xmlns:nitf="urn:nitf:2\.1"/,
+        '<nitf:NITF xmlns:nitf="urn:nitf:2.1" xmlns=""')
+    out << '  <Payload>\n    '
+    out << inlinePayload
     out << '\n  </Payload>\n'
     out << '</NitfMessage>\n'
 
@@ -152,6 +179,8 @@ try {
     log.error("nitf_send: " + t.message, t)
     session.transfer(flowFile, REL_FAILURE)
 } finally {
-    // best-effort cleanup of blob sidecars
-    try { blobDir.toFile().eachFile { it.delete() }; blobDir.toFile().delete() } catch (ignored) {}
+    ACTIVE_PARSES.decrementAndGet()
+    try { deleteDirRecursive(blobDir.toFile()) } catch (Throwable t) {
+        log.warn("nitf_send: failed to clean up blob tempdir ${blobDir}: ${t.message}")
+    }
 }
