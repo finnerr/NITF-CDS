@@ -4,251 +4,74 @@ Send NITF (National Imagery Transmission Format) files across a streaming
 cross-domain solution (CDS) that only accepts a single XML document per
 message and validates against an XSD.
 
-
 We need a way to:
 
 1. Convert NITF to a form the CDS can inspect.
-2. Preserve round-trip fidelity so the high side reconstructs the original
-   NITF byte-for-byte.
-3. Bind the approved metadata to the actual pixel bytes so an attacker
-   cannot swap the payload after inspection.
+2. Preserve round-trip fidelity so the high side reconstructs the original NITF byte-for-byte.
+3. Bind the approved metadata to the actual pixel bytes so an attacker cannot swap the payload after inspection.
 
 ## Approach
 
-Use [Apache Daffodil](https://daffodil.apache.org/) plus a forked copy of
-the Owl Cyber Defense NITF DFDL schema to convert NITF to XML and back.
-Wrap Daffodil's XML in an envelope (`NitfMessage`) that inlines every
-binary payload as base64 with a SHA-256 manifest, so the entire message
-is one self-contained XML document.
+Apache Daffodil parses the binary NITF into an XML infoset using a forked copy of the Owl Cyber Defense NITF DFDL schema. Binary blobs (image data, TREs) are extracted, base64-encoded with SHA-256 hashes, and the whole thing is wrapped in a single `<NitfMessage>` envelope the CDS can validate.
 
 ```
-LOW SIDE                            CDS                         HIGH SIDE
-────────                            ───                         ─────────
-file.nitf                                                       reconstructed.nitf
-  │                                                                    ▲
-  │ daffodil parse                                                     │ daffodil unparse
-  ▼                                                                    │
-parsed.xml + daffodil-blobs/                     rewritten.xml + restored blobs
-  │                                                                    ▲
-  │ nitf_send.py                                                       │ nitf_recv.py
-  ▼                                                                    │
-envelope.xml ──────── TCP ───── guard (XSD + policy) ───── TCP ─────► envelope.xml
+LOW SIDE (NiFi)                     CDS                     HIGH SIDE (NiFi)
+───────────────                ─────────────                ────────────────
+*.ntf (.tar.gz)                XSD validation               reconstructed.ntf
+  │                            · nitf_envelope_lean.xsd           ▲
+  │ UnpackContent               · nitf_infoset_v21.xsd             │
+  │ RouteOnAttribute                                               │
+  ▼                                                               │
+nitf_send.groovy                                         nitf_recv.groovy
+· Daffodil parse NITF → XML                           · verify blob SHA-256
+· blobs → base64 + SHA-256                            · restore blobs to disk
+· inline XML into <Payload>                           · rewrite cds:blob:N URIs
+· build <NitfMessage> envelope                        · Daffodil unparse → .ntf
+  │                                                               ▲
+  └──────────── TCP ───── <NitfMessage> ────── TCP ──────────────┘
 ```
 
-### Wire format
-
-One `NitfMessage` per NITF. Validated against `nitf_envelope.xsd`.
-
-```xml
-<NitfMessage xmlns="urn:cds:nitf:1" version="1">
-  <Manifest>
-    <Blob index="0" size="524288000" sha256="9f8e7d...a1b2"/>
-    ...
-  </Manifest>
-  <Blobs>
-    <BlobData index="0">BASE64...</BlobData>
-    ...
-  </Blobs>
-  <Payload>
-    <nitf:NITF xmlns:nitf="urn:nitf:2.1">...Daffodil output with URIs rewritten to cds:blob:N...</nitf:NITF>
-  </Payload>
-</NitfMessage>
-```
-
-Element order matters: `Manifest` first so a streaming guard knows the
-expected hashes before the bytes arrive; `Blobs` second for stream
-verification; `Payload` last so policy can abort mid-stream before anything
-leaks downstream.
+Element order in the envelope matters: `Manifest` first (guard knows expected hashes before bytes arrive), `Blobs` second (stream verification), `Payload` last (policy can abort before anything leaks downstream).
 
 ## Repo layout
 
 | File | Purpose |
-|---|---|
+|------|---------|
 | `nitf.dfdl.xsd`, `nitf_common_types.dfdl.xsd`, `nitf_extension_types.dfdl.xsd` | Forked Owl/Tresys NITF DFDL schemas (import paths localized) |
-| `jpeg.dfdl.xsd` | Dependency of `nitf_extension_types` (JFIF-compressed imagery) |
-| `nitf_envelope.xsd` | CDS envelope schema with strict NITF payload validation (dev-side) |
-| `nitf_envelope_lean.xsd` | CDS envelope schema with opaque payload (ship this to the CDS) |
-| `samples/sample.envelope.xml` | Known-good envelope for validator smoke-testing |
-| `nitf_send.py` / `nitf_recv.py` | Low-/high-side Python wrappers (reference implementation + CLI) |
-| `nitf_send.groovy` / `nitf_recv.groovy` | NiFi `ExecuteGroovyScript` ports of the senders/receivers |
-| `test/run_roundtrip.groovy` | Single-file harness for the Groovy scripts |
-| `test/batch_roundtrip.groovy` | Full-corpus harness for the Groovy scripts |
-| `test/nifi_stubs/` | Minimal NiFi interface stubs so the Groovy scripts can run outside NiFi |
-
-## Prerequisites
-
-- **JDK 8+** (Temurin recommended)
-  ```
-  brew install --cask temurin
-  ```
-- **Apache Daffodil 4.1.0 (binary distribution)** from
-  <https://daffodil.apache.org/releases/4.1.0/> — extract and add `bin/` to
-  your `PATH`:
-  ```
-  export PATH="/path/to/apache-daffodil-4.1.0-bin/bin:$PATH"
-  ```
-- **Python 3.9+** (stdlib only; no external packages required)
-
-### Fetching the test corpus
-
-`testData/` is not committed. Pull the NITB baseline samples from
-`DFDLSchemas/NITF`:
-
-```
-mkdir -p testData && cd testData
-curl -fsSL "https://api.github.com/repos/DFDLSchemas/NITF/contents/src/test/resources/ntb-baseline" \
-  | python3 -c "import json,sys;[print(f['download_url']) for f in json.load(sys.stdin) if f['name'].lower().endswith('.ntf')]" \
-  | xargs -n1 -P8 curl -fsSLO
-cd ..
-```
-
-## Running the scripts
-
-### Send (low side)
-
-```
-python3 nitf_send.py path/to/file.nitf -o envelope.xml
-```
-
-Useful flags:
-- `--max-binary-size N` — override Daffodil's `maxBinarySizeInBytes`.
-  Default is `0` so every non-empty payload goes through our manifest.
-  Raise (e.g. `10485760`) to let small payloads stay inline as hex.
-- `--keep-workdir` — leave the temp dir in place for inspection.
-
-### Receive (high side)
-
-```
-python3 nitf_recv.py -i envelope.xml -o reconstructed.nitf
-```
-
-Verifies each blob's SHA-256 against the manifest before invoking
-`daffodil unparse`. Fails loud on any mismatch.
-
-### Round-trip smoke test
-
-```
-python3 nitf_send.py testData/i_3034f.ntf -o envelope.xml
-python3 nitf_recv.py -i envelope.xml -o roundtrip.ntf
-cmp testData/i_3034f.ntf roundtrip.ntf && echo OK
-```
-
-### Batch test across all samples
-
-```
-mkdir -p test_artifacts
-for f in testData/*.ntf; do
-  name=$(basename "$f" .ntf)
-  env="test_artifacts/${name}.envelope.xml"
-  out="test_artifacts/${name}.roundtrip.ntf"
-  python3 nitf_send.py "$f" -o "$env" 2>/dev/null
-  python3 nitf_recv.py -i "$env" -o "$out" 2>/dev/null
-  if cmp -s "$f" "$out"; then echo "PASS $name"; else echo "DIFF $name"; fi
-done
-```
-
-Current corpus status: 36/40 byte-identical. The remaining 4
-(`i_3015a`, `i_3025b`, `i_3114e`, `i_3117ax`) also fail a plain
-`daffodil parse`/`unparse` with no envelope, i.e., upstream schema
-round-trip limitations — not something this project introduces.
+| `jpeg.dfdl.xsd` | JFIF dependency of `nitf_extension_types` |
+| `validate/nitf_envelope_lean.xsd` | Root CDS envelope schema — give this path to the CDS |
+| `validate/nitf_infoset_v21.xsd` | Strict NITF 2.1 infoset schema — must be co-located with envelope schema on the CDS |
+| `nitf_send.groovy` | NiFi ExecuteScript processor — low side (NITF → envelope) |
+| `nitf_recv.groovy` | NiFi ExecuteScript processor — high side (envelope → NITF) |
+| `validate/validate.cpp` + `validate/Makefile` | Xerces-C SAX2 schema validator (C++) |
+| `validate/tools/validate_all.sh` | Runs xmllint + Xerces-C against all archive_xml output |
 
 ## NiFi deployment
 
-Production flow uses Apache NiFi on both sides of the CDS, with our
-`nitf_send.groovy` / `nitf_recv.groovy` running inside
-`ExecuteGroovyScript` processors. The Groovy scripts call the Daffodil
-JVM API directly — no subprocess, no CLI, no temp files for XML.
+Both sides run Apache NiFi with `nitf_send.groovy` / `nitf_recv.groovy` inside `ExecuteScript` processors. The Groovy scripts call Daffodil's JAPI directly — no subprocess, no CLI.
 
-### Required files on the NiFi node
+Each NiFi node needs:
+- Daffodil binary distribution — all JARs from its `lib/` directory on the processor's Module Directory
+- DFDL schemas (`nitf.dfdl.xsd` and its three dependencies) in a directory the NiFi service account can read
+- The Groovy scripts staged on disk (not uploaded inline)
 
-1. **Apache Daffodil 4.1.0 binary distribution.** Everything in its
-   `lib/` directory goes onto the processor classpath. Air-gapped:
-   carry the `apache-daffodil-4.1.0-bin.tgz` across on approved media
-   and unpack to, e.g., `/opt/daffodil-4.1.0`.
-2. **The DFDL schemas from this repo**: `nitf.dfdl.xsd`,
-   `nitf_common_types.dfdl.xsd`, `nitf_extension_types.dfdl.xsd`,
-   `jpeg.dfdl.xsd`. Drop them in a single directory the NiFi user can
-   read, e.g., `/opt/nitf-cds/schemas/`.
-3. **The Groovy scripts**: `nitf_send.groovy` and `nitf_recv.groovy`
-   (one per side, but both are safe to stage together).
+Key processor properties (`ExecuteScript`, Groovy engine):
 
-No Maven, pip, or internet access required — Daffodil ships every
-runtime JAR inside its `lib/` directory, and the Groovy scripts use
-only JDK stdlib + Daffodil.
+| Property | Send side | Recv side |
+|----------|-----------|-----------|
+| Script File | `nitf_send.groovy` | `nitf_recv.groovy` |
+| Module Directory | path to Daffodil `lib/` | same |
+| `Schema Path` (dynamic) | path to `nitf.dfdl.xsd` | same |
+| `Max Binary Size` (dynamic) | `0` | — |
+| Concurrent Tasks | **1** (required) | **1** (required) |
 
-### Processor configuration
+> Concurrent Tasks **must** remain 1 on both processors. The scripts enforce this with an `AtomicInteger` guard and will fail-fast if violated. The send script manipulates a JVM-global property (`user.dir`) for Daffodil blob storage; concurrent execution would corrupt blob paths.
 
-For the low-side `ExecuteGroovyScript` processor running
-`nitf_send.groovy`:
+> **Memory**: peak heap usage is ~3× the raw NITF size (parse buffer + rewritten XML + envelope). Size NiFi's JVM heap in `conf/bootstrap.conf` to accommodate the largest expected file × 3.
 
-| Property | Value |
-|---|---|
-| Script File | `/opt/nitf-cds/nitf_send.groovy` |
-| Additional classpath | `/opt/daffodil-4.1.0/lib/*` |
-| Dynamic property: `Schema Path` | `/opt/nitf-cds/schemas/nitf.dfdl.xsd` |
-| Dynamic property: `Max Binary Size` | `0` (force every payload through the manifest) |
+See **NiFi Flow Reference** below for the complete processor-by-processor configuration of the current lab flow.
 
-Receive-side is identical except the script is `nitf_recv.groovy` and
-you don't need the `Max Binary Size` property.
-
-The first FlowFile through each processor pays a one-time ~3-second
-schema compile; subsequent FlowFiles reuse the compiled
-`DataProcessor` via a static field. Do not lower the processor's
-concurrent-tasks below 1 or you'll lose the cache.
-
-### Suggested flow shapes
-
-Low side:
-```
-ListFile (source/) → UnpackContent (.tar.gz) → RouteOnAttribute (*.ntf|*.nitf)
-  → ExecuteGroovyScript (nitf_send.groovy) → PutTCP (→ CDS)
-```
-
-High side:
-```
-ListenTCP → UpdateAttribute (filename) → ExecuteGroovyScript (nitf_recv.groovy)
-  → PutFile (archive/) + PutFile (processing/)
-```
-
-### Smoke test before wiring to the CDS
-
-Run the batch harness on the NiFi node (or any JDK-bearing box) to
-confirm Daffodil + schemas + Groovy scripts agree with your Java
-runtime:
-
-```
-groovy -cp "test/nifi_stubs:/opt/daffodil-4.1.0/lib/*" \
-  test/batch_roundtrip.groovy testData nitf.dfdl.xsd
-```
-
-Expect `36 PASS / 4 DIFF`. The four DIFFs are upstream DFDL round-trip
-limitations, documented in the TODO.
-
-### Preparing an air-gapped bundle
-
-One-time, on a connected box, assemble a single directory you can
-tarball across:
-
-```
-airgap-bundle/
-├── apache-daffodil-4.1.0-bin.tgz      # wget from daffodil.apache.org
-├── jdk/                                # Temurin tar.gz for your target OS
-├── groovy/                             # optional; only if you want the
-│                                       # out-of-NiFi batch harness on-box
-├── nitf-cds/                           # clone of this repo
-└── testData/                           # optional; 40-file corpus for smoke tests
-```
-
-Then on the target: unpack Daffodil, install the JDK, stage the repo
-files where the NiFi user can read them, set the processor properties
-above, start the flow.
-
-## TODO
-
-- [ ] **Large files (>100MB) not handled well.** Both scripts currently
-  load the entire envelope into memory (ElementTree DOM + full base64
-  string). Needs a streaming rewrite (lxml iterparse or SAX) before any
-  real-world NITFs above a few hundred MB are attempted.
+---
 
 ## NiFi Flow Reference — `nitf_nifi` Process Group
 
@@ -577,19 +400,15 @@ ln -s /opt/apache-daffodil-X.Y.Z-bin /opt/daffodil
 
 # 3. Stage project files
 mkdir -p /opt/nitf-cds/schemas /opt/nitf-cds/scripts /opt/nitf-cds/lib
-# DFDL schemas (needed by Daffodil at parse time)
 cp nitf.dfdl.xsd nitf_common_types.dfdl.xsd \
    nitf_extension_types.dfdl.xsd jpeg.dfdl.xsd \
    /opt/nitf-cds/schemas/
-# Groovy scripts
 cp TESTING/nitf_send.groovy TESTING/nitf_recv.groovy /opt/nitf-cds/scripts/
-# Daffodil runtime JARs — NiFi classpath needs all of these
 cp /opt/daffodil/lib/*.jar /opt/nitf-cds/lib/
 
 # 4. Point NiFi at Java 21
 # In /opt/nifi/conf/bootstrap.conf, set:
 #   java.home=/usr/lib/jvm/java-21-openjdk
-# Or export JAVA_HOME before starting NiFi.
 
 # 5. Create a dedicated service account (do not run NiFi as root)
 useradd -r -d /opt/nifi -s /sbin/nologin nifi
@@ -602,37 +421,23 @@ grep "Generated Username\|Generated Password" /opt/nifi/logs/nifi-app.log
 
 ### NiFi 2.x specifics
 
-- **HTTPS only.** NiFi 2.x does not offer HTTP. It generates a self-signed
-  cert at first start. In a classified enclave this is typically acceptable;
-  if your accreditor requires a CA-signed cert, use `nifi-toolkit` (bundled
-  in the NiFi distribution) to generate a CSR before first start.
-- **First-start credentials.** A random username and password are written to
-  `logs/nifi-app.log` on first start. Capture these immediately; they are
-  shown only once. Change them via `bin/nifi.sh set-single-user-credentials`.
-- **Groovy is bundled.** NiFi ships with Groovy inside the scripting NAR.
-  No separate Groovy installation is needed.
-- **ExecuteGroovyScript processor.** Use `ExecuteScript` and select
-  `Groovy` as the engine, *not* a separate processor type.
+- **HTTPS only.** NiFi 2.x does not offer HTTP. It generates a self-signed cert at first start.
+- **First-start credentials.** Random username and password are written to `logs/nifi-app.log` on first start — shown only once. Change them via `bin/nifi.sh set-single-user-credentials`.
+- **Groovy is bundled.** NiFi ships with Groovy inside the scripting NAR. No separate Groovy installation needed.
 
 ### Processor configuration (NiFi 2.x)
-
-For the send-side `ExecuteScript` processor:
 
 | Property | Value |
 |----------|-------|
 | Script Engine | Groovy |
-| Script File | `/opt/nitf-cds/scripts/nitf_send.groovy` |
+| Script File | `/opt/nitf-cds/scripts/nitf_send.groovy` (or `nitf_recv.groovy`) |
 | Module Directory | `/opt/nitf-cds/lib` |
 | Dynamic property: `Schema Path` | `/opt/nitf-cds/schemas/nitf.dfdl.xsd` |
-| Dynamic property: `Max Binary Size` | `0` |
-
-Receive side: same but point Script File at `nitf_recv.groovy`; omit
-`Max Binary Size`.
+| Dynamic property: `Max Binary Size` | `0` (send side only) |
 
 ### CDS schema deployment
 
-The CDS appliance validates the XML it receives. Deploy both XSD files to
-the CDS (exact path depends on the device; consult the vendor):
+Deploy both XSD files to the CDS (exact path depends on the device):
 
 ```
 nitf_envelope_lean.xsd   ← root schema; give this path to the CDS policy config
@@ -645,53 +450,39 @@ a single flat schema — contact the vendor before deployment.
 
 ### SELinux on RHEL 9
 
-RHEL 9 runs SELinux enforcing by default. NiFi writing to temp directories
-and reading schema files may be blocked. Quickest resolution:
-
 ```bash
-# Label directories NiFi owns so SELinux allows read/write
 semanage fcontext -a -t usr_t "/opt/nifi(/.*)?"
 semanage fcontext -a -t usr_t "/opt/nitf-cds(/.*)?"
 restorecon -Rv /opt/nifi /opt/nitf-cds
 ```
 
-If you see `Permission denied` in `nifi-app.log` after labeling, check
-`ausearch -m avc -ts recent` to find the specific denial and add a targeted
-policy rather than setting permissive mode for the whole host.
+If you still see `Permission denied` in `nifi-app.log`, check `ausearch -m avc -ts recent` for the specific denial.
 
 ### Firewall
 
 ```bash
-# NiFi web UI / API (HTTPS)
-firewall-cmd --permanent --add-port=8443/tcp
-# CDS send port (adjust to match your CDS TCP listener)
-firewall-cmd --permanent --add-port=<CDS_PORT>/tcp
+firewall-cmd --permanent --add-port=8443/tcp        # NiFi HTTPS
+firewall-cmd --permanent --add-port=<CDS_PORT>/tcp  # CDS TCP
 firewall-cmd --reload
 ```
 
 ### Time synchronization
 
-NiFi TLS certificates carry validity windows. On an airgapped host, ensure
-the system clock is synchronized to an internal stratum-1 source (GPS clock
-or internal NTP server). Configure via `/etc/chrony.conf`:
+NiFi TLS certificates depend on correct time. Configure chrony to an internal stratum-1 source in `/etc/chrony.conf`:
 
 ```
 server <internal-ntp-host> iburst
 ```
 
-A clock skew of more than a few minutes will cause TLS handshake failures
-between NiFi nodes or between NiFi and the CDS.
+Clock skew of more than a few minutes causes TLS handshake failures.
 
-### Smoke-test before connecting to the CDS
+### Schema validation smoke test
 
 ```bash
-cd /opt/nitf-cds/validate   # after building validate binary with make
+cd /opt/nitf-cds/validate  # after building with make
 ./tools/validate_all.sh
 # Expected: 40 / 40 pass
 ```
-
-If fewer than 40 pass, check that both XSD files are present and that the
-`xmllint` binary (`libxml2` package) is on PATH.
 
 ---
 
