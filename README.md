@@ -19,8 +19,8 @@ LOW SIDE (NiFi)                     CDS                     HIGH SIDE (NiFi)
 ───────────────                ─────────────                ────────────────
 *.ntf (.tar.gz)                XSD validation               reconstructed.ntf
   │                            · nitf_envelope_lean.xsd           ▲
-  │ UnpackContent               · nitf_infoset_v21.xsd             │
-  │ RouteOnAttribute                                               │
+  │ UnpackContent               · nitf_infoset_v21.xsd            │
+  │ RouteOnAttribute                                              │
   ▼                                                               │
 nitf_send.groovy                                         nitf_recv.groovy
 · Daffodil parse NITF → XML                           · verify blob SHA-256
