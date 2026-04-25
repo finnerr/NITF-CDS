@@ -48,11 +48,11 @@ Element order in the envelope matters: `Manifest` first (guard knows expected ha
 
 ## NiFi deployment
 
-Both sides run Apache NiFi with `nitf_send.groovy` / `nitf_recv.groovy` inside `ExecuteScript` processors. The Groovy scripts call Daffodil's JAPI directly — no subprocess, no CLI.
+Both sides run Apache NiFi with `nitf_send.groovy` / `nitf_recv.groovy` inside `ExecuteScript` processors. The Groovy scripts call Daffodil's JAPI directly.
 
 Each NiFi node needs:
 - Daffodil binary distribution — all JARs from its `lib/` directory on the processor's Module Directory
-- DFDL schemas (`nitf.dfdl.xsd` and its three dependencies) in a directory the NiFi service account can read
+- DFDL schemas (`nitf.dfdl.xsd` and its three dependencies) in a directory NiFi can read
 - The Groovy scripts staged on disk (not uploaded inline)
 
 Key processor properties (`ExecuteScript`, Groovy engine):
@@ -349,12 +349,10 @@ TESTING/
 
 ## Airgapped RHEL Deployment
 
-This section covers standing up the full NiFi pipeline on a RHEL 9 host
-with no external internet access. Assumes standard RHEL repos (BaseOS +
-AppStream) are available via an internal mirror or subscription, which is
-typical for classified network enclaves.
+This section covers standing up the full NiFi pipeline on a disconnected RHEL 9 host. Assumes standard RHEL repos (BaseOS +
+AppStream) are available via an internal mirror or subscription.
 
-### What must be burned to approved media
+### What must be transferred
 
 These are not available from standard RHEL repos and must be downloaded
 on a connected machine and transferred in:
@@ -410,20 +408,10 @@ cp /opt/daffodil/lib/*.jar /opt/nitf-cds/lib/
 # In /opt/nifi/conf/bootstrap.conf, set:
 #   java.home=/usr/lib/jvm/java-21-openjdk
 
-# 5. Create a dedicated service account (do not run NiFi as root)
-useradd -r -d /opt/nifi -s /sbin/nologin nifi
-chown -R nifi:nifi /opt/nifi /opt/nitf-cds
-
-# 6. Start NiFi (check logs for the generated HTTPS credentials on first run)
+# 5. Start NiFi (check logs for the generated HTTPS credentials on first run)
 /opt/nifi/bin/nifi.sh start
 grep "Generated Username\|Generated Password" /opt/nifi/logs/nifi-app.log
 ```
-
-### NiFi 2.x specifics
-
-- **HTTPS only.** NiFi 2.x does not offer HTTP. It generates a self-signed cert at first start.
-- **First-start credentials.** Random username and password are written to `logs/nifi-app.log` on first start — shown only once. Change them via `bin/nifi.sh set-single-user-credentials`.
-- **Groovy is bundled.** NiFi ships with Groovy inside the scripting NAR. No separate Groovy installation needed.
 
 ### Processor configuration (NiFi 2.x)
 
@@ -444,37 +432,7 @@ nitf_envelope_lean.xsd   ← root schema; give this path to the CDS policy confi
 nitf_infoset_v21.xsd     ← must be co-located in the same directory
 ```
 
-The root schema imports the infoset schema by relative filename. If the CDS
-cannot resolve relative `xs:import`, the two files must be concatenated into
-a single flat schema — contact the vendor before deployment.
-
-### SELinux on RHEL 9
-
-```bash
-semanage fcontext -a -t usr_t "/opt/nifi(/.*)?"
-semanage fcontext -a -t usr_t "/opt/nitf-cds(/.*)?"
-restorecon -Rv /opt/nifi /opt/nitf-cds
-```
-
-If you still see `Permission denied` in `nifi-app.log`, check `ausearch -m avc -ts recent` for the specific denial.
-
-### Firewall
-
-```bash
-firewall-cmd --permanent --add-port=8443/tcp        # NiFi HTTPS
-firewall-cmd --permanent --add-port=<CDS_PORT>/tcp  # CDS TCP
-firewall-cmd --reload
-```
-
-### Time synchronization
-
-NiFi TLS certificates depend on correct time. Configure chrony to an internal stratum-1 source in `/etc/chrony.conf`:
-
-```
-server <internal-ntp-host> iburst
-```
-
-Clock skew of more than a few minutes causes TLS handshake failures.
+The root schema imports the infoset schema by relative filename.
 
 ### Schema validation smoke test
 
