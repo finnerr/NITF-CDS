@@ -165,7 +165,8 @@ try {
     out << '  <Payload>\n    '
     out << inlinePayload
     out << '\n  </Payload>\n'
-    out << '</NitfMessage>\n'
+    out << '</NitfMessage>\n' + (char)4
+    //(char)4 adds an ASCII 4 delimiter to the end of the file. CDS uses this to delimit the messages
 
     flowFile = session.write(flowFile, { OutputStream os ->
         os.write(out.toString().getBytes("UTF-8"))
